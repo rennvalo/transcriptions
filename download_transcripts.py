@@ -3,6 +3,7 @@ import requests
 import csv
 import json
 import time
+import re
 from datetime import datetime, timezone
 from dotenv import load_dotenv
 from urllib.parse import urlencode
@@ -150,6 +151,47 @@ def write_markdown(transcripts, path):
         lines.append(f'**Description:** {description}')
         lines.append('')
         lines.append('## Transcript')
+        # Collect speaker names from available fields (segments, block-level speaker,
+        # or from leading "Name:" patterns in text) so we can list them up front.
+        speakers = set()
+        for block in transcript.get('transcripts', []):
+            if isinstance(block, dict):
+                # block may carry a speaker or contain segments with speakers
+                if 'speaker' in block and block.get('speaker'):
+                    speakers.add(block.get('speaker').strip())
+                if 'segments' in block:
+                    for seg in block.get('segments', []):
+                        sp = seg.get('speaker') if isinstance(seg, dict) else None
+                        if sp:
+                            speakers.add(sp.strip())
+                        # some APIs use different keys
+                        elif isinstance(seg, dict):
+                            sp2 = seg.get('speaker_name') or seg.get('speakerName') or seg.get('speakerId')
+                            if sp2:
+                                speakers.add(str(sp2).strip())
+            elif isinstance(block, str):
+                # try to extract leading 'Name:' style speaker tokens from raw text
+                m = re.match(r"^([A-Z][A-Za-z .'\-]{1,60}):", block)
+                if m:
+                    speakers.add(m.group(1).strip())
+
+        # Fallback: try scanning segment texts for leading "Name:" patterns if no speakers found
+        if not speakers:
+            for block in transcript.get('transcripts', []):
+                if isinstance(block, dict) and 'segments' in block:
+                    for seg in block.get('segments', []):
+                        text = (seg.get('text') or '').strip() if isinstance(seg, dict) else ''
+                        m = re.match(r"^([A-Z][A-Za-z .'\-]{1,60}):", text)
+                        if m:
+                            speakers.add(m.group(1).strip())
+                elif isinstance(block, str):
+                    text = block.strip()
+                    m = re.match(r"^([A-Z][A-Za-z .'\-]{1,60}):", text)
+                    if m:
+                        speakers.add(m.group(1).strip())
+
+        speaker_line = '**Speakers:** ' + (', '.join(sorted(speakers)) if speakers else 'Unknown')
+        lines.append(speaker_line)
 
         for block in transcript.get('transcripts', []):
             if isinstance(block, dict) and 'segments' in block:
@@ -159,7 +201,12 @@ def write_markdown(transcripts, path):
                     if speaker:
                         lines.append(f'**{speaker}:** {text}')
                     else:
-                        lines.append(text)
+                        # If no explicit speaker field, try to parse a leading "Name: text" pattern
+                        m = re.match(r"^([A-Z][A-Za-z .'\-]{1,60}):\s*(.*)$", text)
+                        if m:
+                            lines.append(f'**{m.group(1)}:** {m.group(2)}')
+                        else:
+                            lines.append(text)
             elif isinstance(block, dict) and 'text' in block:
                 lines.append(block.get('text', ''))
             elif isinstance(block, str):
