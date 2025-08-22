@@ -26,6 +26,7 @@ def fetch_transcripts(start_date, end_date):
     transcripts = []
     offset = 0
     limit = 10
+    import time
     while True:
         params = {
             'key': API_KEY,
@@ -54,6 +55,7 @@ def fetch_transcripts(start_date, end_date):
         if last_dt and last_dt < start_date:
             break
         offset += limit
+        time.sleep(20)  # Add a 2 second delay between requests
     return transcripts
 
 def save_transcript(transcript):
@@ -114,7 +116,28 @@ def main():
         symbol = transcript.get('symbol', '')
         rows.append([filename, title, date, symbol])
         # Build human-readable summary
-        parsed_lines.append(f"Date: {date}\nTitle: {title}\nSymbol: {symbol}\nCall ID: {transcript.get('call_id')}\nExchange: {transcript.get('exchange', '')}\nHeadline: {transcript.get('headline', '')}\nDescription: {transcript.get('description', '')}\n---\n")
+        summary = [
+            f"Date: {date}",
+            f"Title: {title}",
+            f"Symbol: {symbol}",
+            f"Call ID: {transcript.get('call_id')}",
+            f"Exchange: {transcript.get('exchange', '')}",
+            f"Headline: {transcript.get('headline', '')}",
+            f"Description: {transcript.get('description', '')}",
+            "Transcript:",
+            "--------------------------------------------------"
+        ]
+        # Compile transcript content
+        for t in transcript.get('transcripts', []):
+            for seg in t.get('segments', []):
+                speaker = seg.get('speaker', '').strip()
+                text = seg.get('text', '').strip()
+                if speaker:
+                    summary.append(f"{speaker}: {text}")
+                else:
+                    summary.append(f"[Unknown Speaker]: {text}")
+        summary.append("--------------------------------------------------\n")
+        parsed_lines.append('\n'.join(summary))
     update_report_csv(rows)
     # Save parsed summary
     parsed_path = os.path.join(DATA_DIR, 'parsed_results.txt')
