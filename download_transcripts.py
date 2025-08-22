@@ -74,7 +74,7 @@ def update_report_csv(rows):
     with open(REPORT_PATH, 'a', newline='', encoding='utf-8') as csvfile:
         writer = csv.writer(csvfile)
         if not file_exists:
-            writer.writerow(['filename', 'title', 'date'])
+            writer.writerow(['filename', 'title', 'date', 'symbol'])
         for row in rows:
             writer.writerow(row)
 
@@ -111,9 +111,10 @@ def main():
     parsed_lines = []
     for transcript in filtered:
         filename, title, date = save_transcript(transcript)
-        rows.append([filename, title, date])
+        symbol = transcript.get('symbol', '')
+        rows.append([filename, title, date, symbol])
         # Build human-readable summary
-        parsed_lines.append(f"Date: {date}\nTitle: {title}\nCall ID: {transcript.get('call_id')}\nExchange: {transcript.get('exchange', '')}\nHeadline: {transcript.get('headline', '')}\nDescription: {transcript.get('description', '')}\n---\n")
+        parsed_lines.append(f"Date: {date}\nTitle: {title}\nSymbol: {symbol}\nCall ID: {transcript.get('call_id')}\nExchange: {transcript.get('exchange', '')}\nHeadline: {transcript.get('headline', '')}\nDescription: {transcript.get('description', '')}\n---\n")
     update_report_csv(rows)
     # Save parsed summary
     parsed_path = os.path.join(DATA_DIR, 'parsed_results.txt')
