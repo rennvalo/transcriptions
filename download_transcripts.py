@@ -255,12 +255,14 @@ def main():
                     summary.append(f"[Unknown Speaker]: {text}")
         summary.append("--------------------------------------------------\n")
         parsed_lines.append('\n'.join(summary))
-    update_report_csv(rows)
-    # Save parsed summary
-    parsed_path = os.path.join(DATA_DIR, 'parsed_results.txt')
-    with open(parsed_path, 'w', encoding='utf-8') as f:
-        f.writelines(parsed_lines)
-    print(f"Downloaded {len(rows)} transcripts, updated report.csv, and saved raw_results.json and parsed_results.txt.")
+        update_report_csv(rows)
+        # Save parsed summary
+        parsed_path = os.path.join(DATA_DIR, 'parsed_results.txt')
+        with open(parsed_path, 'w', encoding='utf-8') as f:
+            f.writelines(parsed_lines)
+        print(f"Downloaded {len(rows)} transcripts, updated report.csv, saved raw_results.json, parsed_results.txt, and parsed_results.md.")
 
+
+# Only run main() if called from console, not when imported by FastAPI
 if __name__ == '__main__':
     main()

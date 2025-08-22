@@ -1,0 +1,12 @@
+version: '3.8'
+services:
+  transcript-app:
+    build: .
+    container_name: transcript-app
+    ports:
+      - "8000:8000"
+    environment:
+      - KSCOPE_API_KEY=${KSCOPE_API_KEY}
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
