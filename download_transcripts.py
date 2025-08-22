@@ -1,37 +1,11 @@
-# Restore markdown export
-def write_markdown(transcripts, path):
-    lines = []
-    for transcript in transcripts:
-        date = transcript.get('created_at', '')[:10]
-        title = transcript.get('call_title', 'untitled')
-        symbol = transcript.get('symbol', '')
-        call_id = transcript.get('call_id', '')
-        exchange = transcript.get('exchange', '')
-        headline = transcript.get('headline', '')
-        description = transcript.get('description', '')
-        lines.append(f"# {title} ({symbol})\n")
-        lines.append(f"**Date:** {date}")
-        lines.append(f"**Call ID:** {call_id}")
-        lines.append(f"**Exchange:** {exchange}")
-        lines.append(f"**Headline:** {headline}")
-        lines.append(f"**Description:** {description}\n")
-        lines.append("## Transcript\n")
-        for t in transcript.get('transcripts', []):
-            for seg in t.get('segments', []):
-                speaker = seg.get('speaker', '').strip()
-                text = seg.get('text', '').strip()
-                if speaker:
-                    lines.append(f"**{speaker}:** {text}")
-                else:
-                    lines.append(f"**[Unknown Speaker]:** {text}")
-        lines.append("\n---\n")
-    with open(path, 'w', encoding='utf-8') as f:
-        f.write('\n'.join(lines))
 import os
 import requests
 import csv
-from datetime import datetime, timedelta, timezone
+import json
+import time
+from datetime import datetime, timezone
 from dotenv import load_dotenv
+from urllib.parse import urlencode
 
 # Load API key from .env
 load_dotenv()
@@ -43,8 +17,15 @@ API_URL = 'https://api.kscope.io/v2/transcripts/historical'
 
 
 def prompt_user():
+    """Interactive prompt for CLI use only.
+
+    Returns a dict with 'mode' and related keys:
+      - {'mode': 'symbol', 'symbol': 'AAPL'}
+      - {'mode': 'today', 'date': 'YYYY-MM-DD'}
+      - {'mode': 'range', 'start_date': 'YYYY-MM-DD', 'end_date': 'YYYY-MM-DD'}
+    """
     symbol = input('Enter stock symbol (leave blank for today, or type RANGE for date range): ').strip()
-    if symbol == 'RANGE':
+    if symbol.upper() == 'RANGE':
         start_date = input('Enter start date (YYYY-MM-DD): ').strip()
         end_date = input('Enter end date (YYYY-MM-DD): ').strip()
         return {'mode': 'range', 'start_date': start_date, 'end_date': end_date}
@@ -56,10 +37,21 @@ def prompt_user():
 
 
 def fetch_transcripts(params, mode):
+    """Fetch transcripts from API for the given mode and params.
+
+    - mode 'symbol' expects params['symbol'] and will paginate.
+    - mode 'today' expects params['date'] (YYYY-MM-DD).
+    - mode 'range' expects params['start_date'] and params['end_date'].
+
+    Returns a list of transcript dicts (possibly empty).
+    """
+    if not API_KEY:
+        raise RuntimeError('API key not configured in environment')
+
     transcripts = []
     offset = 0
-    limit = 10
-    import time
+    limit = 50  # larger page size to reduce requests
+
     while True:
         req_params = {'key': API_KEY}
         if mode == 'symbol':
@@ -71,42 +63,63 @@ def fetch_transcripts(params, mode):
         elif mode == 'range':
             req_params['start_date'] = params['start_date']
             req_params['end_date'] = params['end_date']
-        from urllib.parse import urlencode
-        full_url = f"{API_URL}?{urlencode(req_params)}"
-        print(f"Requesting: {full_url}")
+        else:
+            raise ValueError('Unknown mode')
+
         try:
-            resp = requests.get(API_URL, params=req_params)
+            resp = requests.get(API_URL, params=req_params, timeout=30)
             resp.raise_for_status()
             data = resp.json().get('data', [])
-        except requests.exceptions.HTTPError as e:
-            print(f"API error: {e}\nResponse: {resp.text}")
-            break
+        except requests.exceptions.RequestException as e:
+            # Return what we have so caller can handle partial results
+            print(f'API request failed: {e}')
+            return transcripts
+
         if not data:
             break
+
         transcripts.extend(data)
+
         if mode == 'symbol':
-            offset += limit
-            time.sleep(2)
             if len(data) < limit:
                 break
+            offset += limit
+            time.sleep(0.5)
         else:
             break
+
     return transcripts
 
+
 def save_transcript(transcript):
-    call_id = transcript.get('call_id')
+    os.makedirs(DATA_DIR, exist_ok=True)
+    call_id = transcript.get('call_id') or 'unknown'
     title = transcript.get('call_title', 'untitled')
-    date = transcript.get('created_at', '')[:10]
+    date = transcript.get('created_at', '')[:10] or datetime.now().date().isoformat()
     filename = f"{date}_{call_id}.txt"
     path = os.path.join(DATA_DIR, filename)
-    text = ''
-    for t in transcript.get('transcripts', []):
-        text += t.get('text', '') + '\n'
+
+    # Attempt to extract readable text
+    text_parts = []
+    for block in transcript.get('transcripts', []):
+        # API shapes differ; try multiple keys
+        if isinstance(block, dict):
+            if 'text' in block:
+                text_parts.append(block.get('text', ''))
+            elif 'segments' in block:
+                for seg in block.get('segments', []):
+                    text_parts.append(seg.get('text', ''))
+        elif isinstance(block, str):
+            text_parts.append(block)
+
     with open(path, 'w', encoding='utf-8') as f:
-        f.write(text)
+        f.write('\n'.join(text_parts))
+
     return filename, title, date
 
+
 def update_report_csv(rows):
+    os.makedirs(DATA_DIR, exist_ok=True)
     file_exists = os.path.isfile(REPORT_PATH)
     with open(REPORT_PATH, 'a', newline='', encoding='utf-8') as csvfile:
         writer = csv.writer(csvfile)
@@ -116,153 +129,129 @@ def update_report_csv(rows):
             writer.writerow(row)
 
 
+def write_markdown(transcripts, path):
+    os.makedirs(os.path.dirname(path) or DATA_DIR, exist_ok=True)
+    lines = []
+    for transcript in transcripts:
+        date = transcript.get('created_at', '')[:10]
+        title = transcript.get('call_title', 'untitled')
+        symbol = transcript.get('symbol', '')
+        call_id = transcript.get('call_id', '')
+        exchange = transcript.get('exchange', '')
+        headline = transcript.get('headline', '')
+        description = transcript.get('description', '')
 
+        lines.append(f'# {title} ({symbol})')
+        lines.append('')
+        lines.append(f'**Date:** {date}')
+        lines.append(f'**Call ID:** {call_id}')
+        lines.append(f'**Exchange:** {exchange}')
+        lines.append(f'**Headline:** {headline}')
+        lines.append(f'**Description:** {description}')
+        lines.append('')
+        lines.append('## Transcript')
+
+        for block in transcript.get('transcripts', []):
+            if isinstance(block, dict) and 'segments' in block:
+                for seg in block.get('segments', []):
+                    speaker = seg.get('speaker', '').strip()
+                    text = seg.get('text', '').strip()
+                    if speaker:
+                        lines.append(f'**{speaker}:** {text}')
+                    else:
+                        lines.append(text)
+            elif isinstance(block, dict) and 'text' in block:
+                lines.append(block.get('text', ''))
+            elif isinstance(block, str):
+                lines.append(block)
+
+        lines.append('\n---\n')
+
+    with open(path, 'w', encoding='utf-8') as f:
+        f.write('\n'.join(lines))
+
+
+def cli_run():
     if not API_KEY:
         print('API key not found in .env file.')
         return
-    os.makedirs(DATA_DIR, exist_ok=True)
+
     user_input = prompt_user()
-    import json
     transcripts = fetch_transcripts(user_input, user_input['mode'])
-    # Save full raw API response
+
+    # Save raw JSON
+    os.makedirs(DATA_DIR, exist_ok=True)
     raw_path = os.path.join(DATA_DIR, 'raw_results.json')
     with open(raw_path, 'w', encoding='utf-8') as f:
         json.dump(transcripts, f, indent=2)
 
+    # Filter according to mode
     filtered = transcripts
-    if user_input['mode'] == 'symbol':
-        # No date filtering, just use all returned
-        pass
-    elif user_input['mode'] == 'today':
-        # Only keep transcripts from today
+    if user_input['mode'] == 'today':
         filtered = [t for t in transcripts if t.get('created_at', '')[:10] == user_input['date']]
     elif user_input['mode'] == 'range':
-        start_date = datetime.strptime(user_input['start_date'], '%Y-%m-%d').date()
-        end_date = datetime.strptime(user_input['end_date'], '%Y-%m-%d').date()
+        try:
+            start_date = datetime.fromisoformat(user_input['start_date']).date()
+            end_date = datetime.fromisoformat(user_input['end_date']).date()
+        except Exception:
+            print('Invalid date format for range; expected YYYY-MM-DD')
+            return
         filtered = []
-        for transcript in transcripts:
-            created_at = transcript.get('created_at', '')[:10]
+        for t in transcripts:
+            created = t.get('created_at', '')[:10]
             try:
-                t_date = datetime.strptime(created_at, '%Y-%m-%d').date()
+                cd = datetime.fromisoformat(created).date()
             except Exception:
                 continue
-            if start_date <= t_date <= end_date:
-                filtered.append(transcript)
+            if start_date <= cd <= end_date:
+                filtered.append(t)
+
     if not filtered:
         print('No transcripts found for the specified input.')
         return
-    rows = []
-    parsed_lines = []
-    for transcript in filtered:
-        filename, title, date = save_transcript(transcript)
-        symbol = transcript.get('symbol', '')
-        rows.append([filename, title, date, symbol])
-        # Build human-readable summary
-        summary = [
-            f"Date: {date}",
-            f"Title: {title}",
-            f"Symbol: {symbol}",
-            f"Call ID: {transcript.get('call_id')}",
-            f"Exchange: {transcript.get('exchange', '')}",
-            f"Headline: {transcript.get('headline', '')}",
-            f"Description: {transcript.get('description', '')}",
-            "Transcript:",
-            "--------------------------------------------------"
-        ]
-        # Compile transcript content
-        for t in transcript.get('transcripts', []):
-            for seg in t.get('segments', []):
-                speaker = seg.get('speaker', '').strip()
-                text = seg.get('text', '').strip()
-                if speaker:
-                    summary.append(f"{speaker}: {text}")
-                else:
-                    summary.append(f"[Unknown Speaker]: {text}")
-        summary.append("--------------------------------------------------\n")
-        parsed_lines.append('\n'.join(summary))
-    update_report_csv(rows)
-    # Save parsed summary
-    parsed_path = os.path.join(DATA_DIR, 'parsed_results.txt')
-    with open(parsed_path, 'w', encoding='utf-8') as f:
-        f.writelines(parsed_lines)
 
-    # Also write markdown file
+    rows = []
+    for t in filtered:
+        filename, title, date = save_transcript(t)
+        rows.append([filename, title, date, t.get('symbol', '')])
+
+    update_report_csv(rows)
+
+    parsed_path = os.path.join(DATA_DIR, 'parsed_results.txt')
+    parsed_lines = []
+    for t in filtered:
+        date = t.get('created_at', '')[:10]
+        title = t.get('call_title', 'untitled')
+        symbol = t.get('symbol', '')
+        parsed_lines.append(f'Date: {date}')
+        parsed_lines.append(f'Title: {title}')
+        parsed_lines.append(f'Symbol: {symbol}')
+        parsed_lines.append(f'Call ID: {t.get("call_id")}')
+        parsed_lines.append('')
+        # Add transcript text
+        for block in t.get('transcripts', []):
+            if isinstance(block, dict) and 'segments' in block:
+                for seg in block.get('segments', []):
+                    speaker = seg.get('speaker', '').strip()
+                    text = seg.get('text', '').strip()
+                    if speaker:
+                        parsed_lines.append(f'{speaker}: {text}')
+                    else:
+                        parsed_lines.append(text)
+            elif isinstance(block, dict) and 'text' in block:
+                parsed_lines.append(block.get('text', ''))
+            elif isinstance(block, str):
+                parsed_lines.append(block)
+        parsed_lines.append('\n' + '-' * 50 + '\n')
+
+    with open(parsed_path, 'w', encoding='utf-8') as f:
+        f.writelines([line + '\n' for line in parsed_lines])
+
     md_path = os.path.join(DATA_DIR, 'parsed_results.md')
     write_markdown(filtered, md_path)
+
     print(f"Downloaded {len(rows)} transcripts, updated report.csv, saved raw_results.json, parsed_results.txt, and parsed_results.md.")
 
-def main():
-    if not API_KEY:
-        print('API key not found in .env file.')
-        return
-    os.makedirs(DATA_DIR, exist_ok=True)
-    user_input = prompt_user()
-    import json
-    transcripts = fetch_transcripts(user_input, user_input['mode'])
-    # Save full raw API response
-    raw_path = os.path.join(DATA_DIR, 'raw_results.json')
-    with open(raw_path, 'w', encoding='utf-8') as f:
-        json.dump(transcripts, f, indent=2)
 
-    filtered = transcripts
-    if user_input['mode'] == 'symbol':
-        # No date filtering, just use all returned
-        pass
-    elif user_input['mode'] == 'today':
-        # Only keep transcripts from today
-        filtered = [t for t in transcripts if t.get('created_at', '')[:10] == user_input['date']]
-    elif user_input['mode'] == 'range':
-        start_date = datetime.strptime(user_input['start_date'], '%Y-%m-%d').date()
-        end_date = datetime.strptime(user_input['end_date'], '%Y-%m-%d').date()
-        filtered = []
-        for transcript in transcripts:
-            created_at = transcript.get('created_at', '')[:10]
-            try:
-                t_date = datetime.strptime(created_at, '%Y-%m-%d').date()
-            except Exception:
-                continue
-            if start_date <= t_date <= end_date:
-                filtered.append(transcript)
-    if not filtered:
-        print('No transcripts found for the specified input.')
-        return
-    rows = []
-    parsed_lines = []
-    for transcript in filtered:
-        filename, title, date = save_transcript(transcript)
-        symbol = transcript.get('symbol', '')
-        rows.append([filename, title, date, symbol])
-        # Build human-readable summary
-        summary = [
-            f"Date: {date}",
-            f"Title: {title}",
-            f"Symbol: {symbol}",
-            f"Call ID: {transcript.get('call_id')}",
-            f"Exchange: {transcript.get('exchange', '')}",
-            f"Headline: {transcript.get('headline', '')}",
-            f"Description: {transcript.get('description', '')}",
-            "Transcript:",
-            "--------------------------------------------------"
-        ]
-        # Compile transcript content
-        for t in transcript.get('transcripts', []):
-            for seg in t.get('segments', []):
-                speaker = seg.get('speaker', '').strip()
-                text = seg.get('text', '').strip()
-                if speaker:
-                    summary.append(f"{speaker}: {text}")
-                else:
-                    summary.append(f"[Unknown Speaker]: {text}")
-        summary.append("--------------------------------------------------\n")
-        parsed_lines.append('\n'.join(summary))
-        update_report_csv(rows)
-        # Save parsed summary
-        parsed_path = os.path.join(DATA_DIR, 'parsed_results.txt')
-        with open(parsed_path, 'w', encoding='utf-8') as f:
-            f.writelines(parsed_lines)
-        print(f"Downloaded {len(rows)} transcripts, updated report.csv, saved raw_results.json, parsed_results.txt, and parsed_results.md.")
-
-
-# Only run main() if called from console, not when imported by FastAPI
 if __name__ == '__main__':
-    main()
+    cli_run()
